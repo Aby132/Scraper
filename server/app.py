@@ -27,8 +27,12 @@ openai_client = None
 if OPENAI_API_KEY:
     try:
         openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception:
+        print("OpenAI client initialized successfully")
+    except Exception as e:
+        print(f"Warning: Could not initialize OpenAI client: {e}")
         openai_client = None
+else:
+    print("Warning: OPENAI_API_KEY not found in environment variables. AI features will be disabled.")
 
 
 APP_NAME = "Scrape"
@@ -82,18 +86,45 @@ class ScrapeResponse(BaseModel):
     warnings: List[str]
 
 
-app = FastAPI(title=APP_NAME, version="0.1.0")
+app = FastAPI(title=APP_NAME, version="1.0.0", description="AI-powered web scraping API with comprehensive data extraction")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
     ],
     allow_credentials=False,
-    allow_methods=["POST"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.get("/")
+def root():
+    """Root endpoint with API information."""
+    return {
+        "name": APP_NAME,
+        "version": "1.0.0",
+        "status": "running",
+        "openai_configured": openai_client is not None,
+        "endpoints": {
+            "scrape": "/api/scrape",
+            "docs": "/docs",
+            "health": "/health"
+        }
+    }
+
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "openai_available": openai_client is not None
+    }
 
 
 def _ensure_public_host(host: str) -> None:
@@ -357,11 +388,16 @@ def _extract_metadata(html: str, base_url: str) -> tuple[str | None, str | None,
 def _get_ai_analysis(text: str, title: str | None, tables: list, forms: list, links: list) -> tuple[str | None, list[str] | None, str | None, str | None, list[dict] | None, list[str] | None, list[str] | None, dict | None, str | None]:
     """Use OpenAI to comprehensively analyze and extract structured data from scraped content."""
     if not openai_client:
+        print("OpenAI client not available, skipping AI analysis")
         return None, None, None, None, None, None, None, None, None
 
     try:
         # Prepare context for AI
         text_for_analysis = text[:12000] if len(text) > 12000 else text
+        if not text_for_analysis or len(text_for_analysis.strip()) < 10:
+            print("Warning: Text content too short for AI analysis")
+            return None, None, None, None, None, None, None, None, None
+            
         tables_info = f"Found {len(tables)} tables" if tables else "No tables found"
         forms_info = f"Found {len(forms)} forms" if forms else "No forms found"
         links_count = len(links)
@@ -398,6 +434,7 @@ KEYWORDS: [comma-separated keywords]
 STRUCTURED_DATA: [JSON object]
 INSIGHTS: [insights text]"""
 
+        print("Calling OpenAI API for content analysis...")
         response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
@@ -406,9 +443,20 @@ INSIGHTS: [insights text]"""
             ],
             max_tokens=2000,
             temperature=0.7,
+            timeout=30.0,  # 30 second timeout
         )
 
+        if not response or not response.choices or len(response.choices) == 0:
+            print("Error: Empty response from OpenAI API")
+            return None, None, None, None, None, None, None, None, None
+
         content = response.choices[0].message.content
+        
+        if not content:
+            print("Error: No content in OpenAI response")
+            return None, None, None, None, None, None, None, None, None
+        
+        print(f"OpenAI API response received ({len(content)} characters)")
         
         # Parse the comprehensive response
         summary = None
@@ -440,8 +488,18 @@ INSIGHTS: [insights text]"""
             entities_section = content.split("ENTITIES:")[1].split("TOPICS:")[0] if "TOPICS:" in content else content.split("ENTITIES:")[1]
             try:
                 import json
-                entities = json.loads(entities_section.strip())
-            except:
+                # Try to extract JSON from the section
+                entities_text = entities_section.strip()
+                # Remove any markdown code blocks if present
+                if entities_text.startswith("```"):
+                    entities_text = entities_text.split("```")[1]
+                    if entities_text.startswith("json"):
+                        entities_text = entities_text[4:]
+                entities_text = entities_text.strip()
+                entities = json.loads(entities_text)
+                print(f"Extracted {len(entities) if isinstance(entities, list) else 0} entities")
+            except json.JSONDecodeError as e:
+                print(f"Warning: Could not parse entities JSON: {e}")
                 entities = None
         
         if "TOPICS:" in content:
@@ -456,103 +514,186 @@ INSIGHTS: [insights text]"""
             structured_section = content.split("STRUCTURED_DATA:")[1].split("INSIGHTS:")[0] if "INSIGHTS:" in content else content.split("STRUCTURED_DATA:")[1]
             try:
                 import json
-                structured_data = json.loads(structured_section.strip())
-            except:
+                # Try to extract JSON from the section
+                structured_text = structured_section.strip()
+                # Remove any markdown code blocks if present
+                if structured_text.startswith("```"):
+                    structured_text = structured_text.split("```")[1]
+                    if structured_text.startswith("json"):
+                        structured_text = structured_text[4:]
+                structured_text = structured_text.strip()
+                structured_data = json.loads(structured_text)
+                print("Successfully extracted structured data")
+            except json.JSONDecodeError as e:
+                print(f"Warning: Could not parse structured_data JSON: {e}")
                 structured_data = None
         
         if "INSIGHTS:" in content:
             insights = content.split("INSIGHTS:")[1].strip()
 
+        print("AI analysis completed successfully")
         return summary, key_points if key_points else None, category, sentiment, entities, topics if topics else None, keywords if keywords else None, structured_data, insights
 
     except Exception as e:
+        import traceback
         print(f"AI analysis failed: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
         return None, None, None, None, None, None, None, None, None
 
 
 def _fetch_html(target_url: str) -> tuple[str, list[str]]:
+    """Fetch HTML content from the target URL with proper error handling."""
     try:
+        print(f"Fetching URL: {target_url}")
         response = requests.get(
             target_url,
-            headers={"User-Agent": USER_AGENT},
-            timeout=(5, 15),
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+            },
+            timeout=(10, 30),  # Increased timeout
             allow_redirects=True,
+            stream=True,  # Stream to check size before downloading
         )
+        response.raise_for_status()  # Raise exception for bad status codes
+        
+        print(f"Response status: {response.status_code}")
+        print(f"Content-Type: {response.headers.get('content-type', 'unknown')}")
+        
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Request timeout: The server took too long to respond.")
+    except requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=502, detail="Connection error: Could not connect to the server.")
+    except requests.exceptions.HTTPError as e:
+        raise HTTPException(status_code=e.response.status_code if e.response else 502, detail=f"HTTP error: {e}")
     except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Request failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Request failed: {str(exc)}") from exc
 
-    content_type = response.headers.get("content-type", "")
+    content_type = response.headers.get("content-type", "").lower()
     if not any(ct in content_type for ct in SCRAPABLE_CONTENT_TYPES):
-        raise HTTPException(status_code=415, detail="Unsupported content type.")
-
-    if len(response.content) > MAX_DOWNLOAD_BYTES:
         raise HTTPException(
-            status_code=413, detail="Page is too large to fetch safely."
+            status_code=415, 
+            detail=f"Unsupported content type: {content_type}. Only HTML content is supported."
         )
 
-    return response.text, [f"Content-Type: {content_type}"]
+    # Check content length
+    content_length = response.headers.get("content-length")
+    if content_length and int(content_length) > MAX_DOWNLOAD_BYTES:
+        raise HTTPException(
+            status_code=413, 
+            detail=f"Page is too large ({content_length} bytes). Maximum size is {MAX_DOWNLOAD_BYTES} bytes."
+        )
+
+    # Read content with size check
+    content = b""
+    for chunk in response.iter_content(chunk_size=8192):
+        content += chunk
+        if len(content) > MAX_DOWNLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Page is too large. Maximum size is {MAX_DOWNLOAD_BYTES} bytes."
+            )
+    
+    print(f"Successfully fetched {len(content)} bytes")
+    return content.decode("utf-8", errors="ignore"), [f"Content-Type: {content_type}"]
 
 
 @app.post("/api/scrape", response_model=ScrapeResponse)
 def scrape(request: ScrapeRequest) -> ScrapeResponse:
-    parsed = urlparse(str(request.url))
-    if parsed.scheme not in {"http", "https"}:
-        raise HTTPException(status_code=400, detail="Only HTTP/S URLs are supported.")
+    """Main scraping endpoint that fetches and analyzes web content."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"Scraping request received for: {request.url}")
+        print(f"{'='*60}\n")
+        
+        parsed = urlparse(str(request.url))
+        if parsed.scheme not in {"http", "https"}:
+            raise HTTPException(status_code=400, detail="Only HTTP/S URLs are supported.")
 
-    _ensure_public_host(parsed.hostname or "")
+        _ensure_public_host(parsed.hostname or "")
+        print(f"Host validation passed: {parsed.hostname}")
 
-    allowed, robot_warnings = _is_allowed_by_robots(str(request.url))
-    if not allowed:
-        raise HTTPException(status_code=403, detail="robots.txt forbids scraping.")
+        allowed, robot_warnings = _is_allowed_by_robots(str(request.url))
+        if not allowed:
+            raise HTTPException(status_code=403, detail="robots.txt forbids scraping.")
+        print(f"robots.txt check passed. Warnings: {robot_warnings}")
 
-    html, response_warnings = _fetch_html(str(request.url))
-    title, description, excerpt, full_text, links, images, headings, meta_tags, social_tags, lang, word_count, tables, forms, buttons, videos, scripts, stylesheets, lists_data, paragraphs, quotes, code_blocks, login_warnings = _extract_metadata(
-        html, str(request.url)
-    )
+        print("Fetching HTML content...")
+        html, response_warnings = _fetch_html(str(request.url))
+        print(f"HTML fetched successfully ({len(html)} characters)")
 
-    if login_warnings:
-        raise HTTPException(status_code=400, detail=login_warnings[0])
+        print("Extracting metadata...")
+        title, description, excerpt, full_text, links, images, headings, meta_tags, social_tags, lang, word_count, tables, forms, buttons, videos, scripts, stylesheets, lists_data, paragraphs, quotes, code_blocks, login_warnings = _extract_metadata(
+            html, str(request.url)
+        )
+        print(f"Metadata extracted: {len(links)} links, {len(images)} images, {word_count} words")
 
-    # Get comprehensive AI analysis
-    ai_summary, ai_key_points, ai_category, ai_sentiment, ai_entities, ai_topics, ai_keywords, ai_structured_data, ai_insights = _get_ai_analysis(
-        full_text, title, tables, forms, links
-    )
+        if login_warnings:
+            raise HTTPException(status_code=400, detail=login_warnings[0])
 
-    warnings = robot_warnings + response_warnings
+        # Get comprehensive AI analysis using OpenAI
+        print("Starting AI analysis with OpenAI...")
+        ai_summary, ai_key_points, ai_category, ai_sentiment, ai_entities, ai_topics, ai_keywords, ai_structured_data, ai_insights = _get_ai_analysis(
+            full_text, title, tables, forms, links
+        )
+        
+        if ai_summary:
+            print("AI analysis completed successfully")
+        else:
+            print("AI analysis skipped or failed (non-critical)")
 
-    return ScrapeResponse(
-        fetched_url=request.url,
-        title=title,
-        description=description,
-        text_excerpt=excerpt,
-        full_text=full_text,
-        links=links,
-        images=images,
-        headings=headings,
-        meta_tags=meta_tags,
-        social_tags=social_tags,
-        language=lang,
-        word_count=word_count,
-        tables=tables,
-        forms=forms,
-        buttons=buttons,
-        videos=videos,
-        scripts=scripts,
-        stylesheets=stylesheets,
-        lists=lists_data,
-        paragraphs=paragraphs,
-        quotes=quotes,
-        code_blocks=code_blocks,
-        ai_summary=ai_summary,
-        ai_key_points=ai_key_points,
-        ai_category=ai_category,
-        ai_sentiment=ai_sentiment,
-        ai_entities=ai_entities,
-        ai_topics=ai_topics,
-        ai_keywords=ai_keywords,
-        ai_structured_data=ai_structured_data,
-        ai_insights=ai_insights,
-        warnings=warnings,
-    )
+        warnings = robot_warnings + response_warnings
+
+        print(f"\n{'='*60}")
+        print("Scraping completed successfully!")
+        print(f"{'='*60}\n")
+
+        return ScrapeResponse(
+            fetched_url=request.url,
+            title=title,
+            description=description,
+            text_excerpt=excerpt,
+            full_text=full_text,
+            links=links,
+            images=images,
+            headings=headings,
+            meta_tags=meta_tags,
+            social_tags=social_tags,
+            language=lang,
+            word_count=word_count,
+            tables=tables,
+            forms=forms,
+            buttons=buttons,
+            videos=videos,
+            scripts=scripts,
+            stylesheets=stylesheets,
+            lists=lists_data,
+            paragraphs=paragraphs,
+            quotes=quotes,
+            code_blocks=code_blocks,
+            ai_summary=ai_summary,
+            ai_key_points=ai_key_points,
+            ai_category=ai_category,
+            ai_sentiment=ai_sentiment,
+            ai_entities=ai_entities,
+            ai_topics=ai_topics,
+            ai_keywords=ai_keywords,
+            ai_structured_data=ai_structured_data,
+            ai_insights=ai_insights,
+            warnings=warnings,
+        )
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
+    except Exception as e:
+        # Catch any unexpected errors
+        import traceback
+        error_msg = f"Unexpected error during scraping: {str(e)}"
+        print(f"ERROR: {error_msg}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=error_msg) from e
 
 
