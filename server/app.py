@@ -16,7 +16,10 @@ from openai import OpenAI
 from pydantic import BaseModel, HttpUrl
 
 # Load environment variables
-load_dotenv()
+try:
+    load_dotenv()
+except Exception as e:
+    print(f"Warning: Could not load .env file: {e}")
 
 # Initialize OpenAI client
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -55,9 +58,27 @@ class ScrapeResponse(BaseModel):
     social_tags: dict[str, str]
     language: str | None = None
     word_count: int
+    # Enhanced data extraction
+    tables: List[dict] = []
+    forms: List[dict] = []
+    buttons: List[dict] = []
+    videos: List[str] = []
+    scripts: List[str] = []
+    stylesheets: List[str] = []
+    lists: List[dict] = []
+    paragraphs: List[str] = []
+    quotes: List[str] = []
+    code_blocks: List[str] = []
+    # AI-powered analysis
     ai_summary: str | None = None
     ai_key_points: List[str] | None = None
     ai_category: str | None = None
+    ai_sentiment: str | None = None
+    ai_entities: List[dict] | None = None
+    ai_topics: List[str] | None = None
+    ai_keywords: List[str] | None = None
+    ai_structured_data: dict | None = None
+    ai_insights: str | None = None
     warnings: List[str]
 
 
@@ -113,7 +134,7 @@ def _is_allowed_by_robots(target_url: str) -> tuple[bool, list[str]]:
     return allowed, warnings
 
 
-def _extract_metadata(html: str, base_url: str) -> tuple[str | None, str | None, str, str, list[str], list[str], dict[str, list[str]], dict[str, str], dict[str, str], str | None, int, list[str]]:
+def _extract_metadata(html: str, base_url: str) -> tuple[str | None, str | None, str, str, list[str], list[str], dict[str, list[str]], dict[str, str], dict[str, str], str | None, int, list[dict], list[dict], list[dict], list[str], list[str], list[str], list[dict], list[str], list[str], list[str], list[str], list[str]]:
     soup = BeautifulSoup(html, "html.parser")
 
     # Basic metadata
@@ -201,74 +222,252 @@ def _extract_metadata(html: str, base_url: str) -> tuple[str | None, str | None,
         if name and content:
             social_tags[f"twitter:{name}"] = content
 
+    # Extract tables
+    tables = []
+    for table in soup.find_all("table"):
+        table_data = {"headers": [], "rows": []}
+        headers = table.find_all("th")
+        if headers:
+            table_data["headers"] = [th.get_text(strip=True) for th in headers]
+        for row in table.find_all("tr"):
+            cells = row.find_all(["td", "th"])
+            if cells:
+                table_data["rows"].append([cell.get_text(strip=True) for cell in cells])
+        if table_data["rows"] or table_data["headers"]:
+            tables.append(table_data)
+            if len(tables) >= 20:  # Limit to 20 tables
+                break
+
+    # Extract forms
+    forms = []
+    for form in soup.find_all("form"):
+        form_data = {
+            "action": form.get("action", ""),
+            "method": form.get("method", "get").upper(),
+            "inputs": []
+        }
+        for input_tag in form.find_all(["input", "textarea", "select"]):
+            input_data = {
+                "type": input_tag.get("type", input_tag.name),
+                "name": input_tag.get("name", ""),
+                "placeholder": input_tag.get("placeholder", ""),
+                "label": ""
+            }
+            # Try to find associated label
+            if input_tag.get("id"):
+                label = soup.find("label", {"for": input_tag.get("id")})
+                if label:
+                    input_data["label"] = label.get_text(strip=True)
+            form_data["inputs"].append(input_data)
+        if form_data["inputs"]:
+            forms.append(form_data)
+            if len(forms) >= 10:  # Limit to 10 forms
+                break
+
+    # Extract buttons
+    buttons = []
+    for button in soup.find_all(["button", "input"]):
+        if button.get("type") in ["button", "submit", "reset"] or button.name == "button":
+            button_data = {
+                "text": button.get_text(strip=True) or button.get("value", ""),
+                "type": button.get("type", "button"),
+                "class": button.get("class", [])
+            }
+            buttons.append(button_data)
+            if len(buttons) >= 50:
+                break
+
+    # Extract videos
+    videos = []
+    for video in soup.find_all(["video", "iframe"]):
+        src = video.get("src") or video.get("data-src")
+        if not src and video.name == "iframe":
+            src = video.get("src")
+        if src:
+            absolute = urljoin(base_url, src)
+            if absolute.startswith(("http://", "https://")):
+                videos.append(absolute)
+                if len(videos) >= 20:
+                    break
+
+    # Extract scripts
+    scripts = []
+    for script in soup.find_all("script", src=True):
+        src = script.get("src")
+        if src:
+            absolute = urljoin(base_url, src)
+            if absolute.startswith(("http://", "https://")):
+                scripts.append(absolute)
+                if len(scripts) >= 30:
+                    break
+
+    # Extract stylesheets
+    stylesheets = []
+    for link in soup.find_all("link", rel="stylesheet"):
+        href = link.get("href")
+        if href:
+            absolute = urljoin(base_url, href)
+            if absolute.startswith(("http://", "https://")):
+                stylesheets.append(absolute)
+                if len(stylesheets) >= 20:
+                    break
+
+    # Extract lists
+    lists_data = []
+    for list_tag in soup.find_all(["ul", "ol"]):
+        items = [li.get_text(strip=True) for li in list_tag.find_all("li")]
+        if items:
+            lists_data.append({
+                "type": list_tag.name,
+                "items": items[:50]  # Limit items per list
+            })
+            if len(lists_data) >= 30:
+                break
+
+    # Extract paragraphs
+    paragraphs = [p.get_text(strip=True) for p in soup.find_all("p") if p.get_text(strip=True)]
+    paragraphs = paragraphs[:100]  # Limit to 100 paragraphs
+
+    # Extract quotes
+    quotes = []
+    for quote in soup.find_all(["blockquote", "q", "cite"]):
+        quote_text = quote.get_text(strip=True)
+        if quote_text:
+            quotes.append(quote_text)
+            if len(quotes) >= 30:
+                break
+
+    # Extract code blocks
+    code_blocks = []
+    for code in soup.find_all(["code", "pre"]):
+        code_text = code.get_text(strip=True)
+        if code_text and len(code_text) > 10:  # Only meaningful code blocks
+            code_blocks.append(code_text[:500])  # Limit length
+            if len(code_blocks) >= 20:
+                break
+
     # Check for login forms
     warnings = []
     if soup.find("input", {"type": "password"}) or soup.find("form", {"id": lambda x: x and "login" in x.lower()}) or "login" in text.lower()[:500]:
         warnings.append("Login form detected; scraping aborted.")
 
-    return title, description, excerpt, text, links, images, headings, meta_tags, social_tags, lang, word_count, warnings
+    return title, description, excerpt, text, links, images, headings, meta_tags, social_tags, lang, word_count, tables, forms, buttons, videos, scripts, stylesheets, lists_data, paragraphs, quotes, code_blocks, warnings
 
 
-def _get_ai_analysis(text: str, title: str | None) -> tuple[str | None, list[str] | None, str | None]:
-    """Use OpenAI to analyze and summarize the scraped content."""
+def _get_ai_analysis(text: str, title: str | None, tables: list, forms: list, links: list) -> tuple[str | None, list[str] | None, str | None, str | None, list[dict] | None, list[str] | None, list[str] | None, dict | None, str | None]:
+    """Use OpenAI to comprehensively analyze and extract structured data from scraped content."""
     if not openai_client:
-        return None, None, None
+        return None, None, None, None, None, None, None, None, None
 
     try:
-        # Limit text length for API (keep first 8000 characters)
-        text_for_analysis = text[:8000] if len(text) > 8000 else text
+        # Prepare context for AI
+        text_for_analysis = text[:12000] if len(text) > 12000 else text
+        tables_info = f"Found {len(tables)} tables" if tables else "No tables found"
+        forms_info = f"Found {len(forms)} forms" if forms else "No forms found"
+        links_count = len(links)
         
-        prompt = f"""Analyze the following webpage content and provide:
-1. A concise summary (2-3 sentences)
-2. 3-5 key points or main topics
-3. The primary category/type of content (e.g., "News Article", "Product Page", "Blog Post", "Documentation", "E-commerce", etc.)
+        prompt = f"""Analyze the following webpage content comprehensively and provide detailed insights:
 
 Title: {title or 'Not provided'}
 Content: {text_for_analysis}
+Additional Info: {tables_info}, {forms_info}, {links_count} links found
 
-Format your response as:
-SUMMARY: [your summary here]
+Please provide:
+1. SUMMARY: A comprehensive 3-4 sentence summary
+2. KEY_POINTS: 5-7 main topics or key points (one per line, prefixed with "-")
+3. CATEGORY: Primary content type (e.g., "News Article", "Product Page", "Blog Post", "Documentation", "E-commerce", "Landing Page", etc.)
+4. SENTIMENT: Overall sentiment (Positive, Negative, Neutral, or Mixed)
+5. ENTITIES: Extract important entities (people, organizations, locations, products) as JSON array: [{{"name": "...", "type": "PERSON|ORG|LOCATION|PRODUCT"}}]
+6. TOPICS: List 5-7 main topics discussed (one per line, prefixed with "-")
+7. KEYWORDS: Extract 10-15 important keywords (comma-separated)
+8. STRUCTURED_DATA: Extract structured information as JSON object with keys like: purpose, target_audience, main_offer, contact_info, pricing_info, features (if applicable)
+9. INSIGHTS: Provide 2-3 actionable insights about the content
+
+Format your response exactly as:
+SUMMARY: [summary text]
 KEY_POINTS:
 - [point 1]
 - [point 2]
-- [point 3]
-CATEGORY: [category name]"""
+CATEGORY: [category]
+SENTIMENT: [sentiment]
+ENTITIES: [JSON array]
+TOPICS:
+- [topic 1]
+- [topic 2]
+KEYWORDS: [comma-separated keywords]
+STRUCTURED_DATA: [JSON object]
+INSIGHTS: [insights text]"""
 
         response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that analyzes web content and provides concise summaries and insights."},
+                {"role": "system", "content": "You are an expert web content analyst that extracts comprehensive structured data and insights from web pages. Always provide valid JSON when requested."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=500,
+            max_tokens=2000,
             temperature=0.7,
         )
 
         content = response.choices[0].message.content
         
-        # Parse the response
+        # Parse the comprehensive response
         summary = None
         key_points = []
         category = None
+        sentiment = None
+        entities = None
+        topics = []
+        keywords = []
+        structured_data = None
+        insights = None
 
         if "SUMMARY:" in content:
             summary = content.split("SUMMARY:")[1].split("KEY_POINTS:")[0].strip()
         
         if "KEY_POINTS:" in content:
-            key_points_section = content.split("KEY_POINTS:")[1]
-            if "CATEGORY:" in key_points_section:
-                key_points_section = key_points_section.split("CATEGORY:")[0]
+            key_points_section = content.split("KEY_POINTS:")[1].split("CATEGORY:")[0] if "CATEGORY:" in content else content.split("KEY_POINTS:")[1]
             key_points = [point.strip().lstrip("- ").strip() for point in key_points_section.strip().split("\n") if point.strip() and point.strip().startswith("-")]
         
         if "CATEGORY:" in content:
-            category = content.split("CATEGORY:")[1].strip()
+            category_section = content.split("CATEGORY:")[1]
+            category = category_section.split("SENTIMENT:")[0].strip() if "SENTIMENT:" in category_section else category_section.split("\n")[0].strip()
+        
+        if "SENTIMENT:" in content:
+            sentiment_section = content.split("SENTIMENT:")[1]
+            sentiment = sentiment_section.split("ENTITIES:")[0].strip() if "ENTITIES:" in sentiment_section else sentiment_section.split("\n")[0].strip()
+        
+        if "ENTITIES:" in content:
+            entities_section = content.split("ENTITIES:")[1].split("TOPICS:")[0] if "TOPICS:" in content else content.split("ENTITIES:")[1]
+            try:
+                import json
+                entities = json.loads(entities_section.strip())
+            except:
+                entities = None
+        
+        if "TOPICS:" in content:
+            topics_section = content.split("TOPICS:")[1].split("KEYWORDS:")[0] if "KEYWORDS:" in content else content.split("TOPICS:")[1]
+            topics = [topic.strip().lstrip("- ").strip() for topic in topics_section.strip().split("\n") if topic.strip() and topic.strip().startswith("-")]
+        
+        if "KEYWORDS:" in content:
+            keywords_section = content.split("KEYWORDS:")[1].split("STRUCTURED_DATA:")[0] if "STRUCTURED_DATA:" in content else content.split("KEYWORDS:")[1]
+            keywords = [kw.strip() for kw in keywords_section.strip().split(",") if kw.strip()]
+        
+        if "STRUCTURED_DATA:" in content:
+            structured_section = content.split("STRUCTURED_DATA:")[1].split("INSIGHTS:")[0] if "INSIGHTS:" in content else content.split("STRUCTURED_DATA:")[1]
+            try:
+                import json
+                structured_data = json.loads(structured_section.strip())
+            except:
+                structured_data = None
+        
+        if "INSIGHTS:" in content:
+            insights = content.split("INSIGHTS:")[1].strip()
 
-        return summary, key_points if key_points else None, category
+        return summary, key_points if key_points else None, category, sentiment, entities, topics if topics else None, keywords if keywords else None, structured_data, insights
 
     except Exception as e:
-        # If AI analysis fails, return None values (graceful degradation)
         print(f"AI analysis failed: {e}")
-        return None, None, None
+        return None, None, None, None, None, None, None, None, None
 
 
 def _fetch_html(target_url: str) -> tuple[str, list[str]]:
@@ -307,15 +506,17 @@ def scrape(request: ScrapeRequest) -> ScrapeResponse:
         raise HTTPException(status_code=403, detail="robots.txt forbids scraping.")
 
     html, response_warnings = _fetch_html(str(request.url))
-    title, description, excerpt, full_text, links, images, headings, meta_tags, social_tags, lang, word_count, login_warnings = _extract_metadata(
+    title, description, excerpt, full_text, links, images, headings, meta_tags, social_tags, lang, word_count, tables, forms, buttons, videos, scripts, stylesheets, lists_data, paragraphs, quotes, code_blocks, login_warnings = _extract_metadata(
         html, str(request.url)
     )
 
     if login_warnings:
         raise HTTPException(status_code=400, detail=login_warnings[0])
 
-    # Get AI analysis
-    ai_summary, ai_key_points, ai_category = _get_ai_analysis(full_text, title)
+    # Get comprehensive AI analysis
+    ai_summary, ai_key_points, ai_category, ai_sentiment, ai_entities, ai_topics, ai_keywords, ai_structured_data, ai_insights = _get_ai_analysis(
+        full_text, title, tables, forms, links
+    )
 
     warnings = robot_warnings + response_warnings
 
@@ -332,9 +533,25 @@ def scrape(request: ScrapeRequest) -> ScrapeResponse:
         social_tags=social_tags,
         language=lang,
         word_count=word_count,
+        tables=tables,
+        forms=forms,
+        buttons=buttons,
+        videos=videos,
+        scripts=scripts,
+        stylesheets=stylesheets,
+        lists=lists_data,
+        paragraphs=paragraphs,
+        quotes=quotes,
+        code_blocks=code_blocks,
         ai_summary=ai_summary,
         ai_key_points=ai_key_points,
         ai_category=ai_category,
+        ai_sentiment=ai_sentiment,
+        ai_entities=ai_entities,
+        ai_topics=ai_topics,
+        ai_keywords=ai_keywords,
+        ai_structured_data=ai_structured_data,
+        ai_insights=ai_insights,
         warnings=warnings,
     )
 

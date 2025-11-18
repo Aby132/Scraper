@@ -4,6 +4,26 @@
 
 @layer base {
   body {
-    @apply bg-gradient-to-br from-blue-50 via-white to-indigo-50 min-h-screen;
+    @apply bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 min-h-screen antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
   }
 }
